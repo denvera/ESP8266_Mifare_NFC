@@ -3,6 +3,8 @@
 #include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
+#include <ESP8266WebServer.h>
+#include <FS.h>
 #include <SPI.h>
 #include <PN532.h>
 #include <PN532_SPI.h>
@@ -15,6 +17,8 @@
 
 PN532_SPI pn532spi(SPI, 15);
 PN532 nfc(pn532spi);
+ESP8266WebServer server(80);
+bool mounted = false;
 
 void setup() {
   Serial.begin(115200);
@@ -44,9 +48,51 @@ void setup() {
   
   // configure board to read RFID tags
   nfc.SAMConfig();
-  
+  if (SPIFFS.begin()) {
+    mounted = true;
+    Serial.println("Mounted SPIFFS");
+  } else {
+    Serial.println("Failed to mount SPIFFS");
+  }
   Serial.println("Waiting for an ISO14443A Card ...");
 
+}
+
+JsonObject * getTagInfoFromFS(String uidStr, JsonBuffer * jsonBuffer) {
+  if (mounted) {
+    if (SPIFFS.exists("/tags/" + uidStr + ".txt")) {
+      Serial.println("Found tag file");
+      File f = SPIFFS.open("/tags/" + uidStr + ".txt", "r");
+      if (f) {        
+        String tagJson = f.readString();
+        f.close();        
+        JsonObject * root = NULL;
+        root = &(jsonBuffer->parseObject(tagJson));
+        if (root->success()) {
+          return root;
+        } else {
+          Serial.println("Error parsing json: " + tagJson);
+          return NULL;
+        }
+      } else {
+        Serial.println("Couldnt open tag file");
+      }
+    } else {
+      Serial.println("No tag file found");
+    }
+  }
+  return NULL;
+}
+
+bool saveTagInfoToFS(String uidStr, String tagJson) {
+  File f = SPIFFS.open("/tags/" + uidStr + ".txt", "w+");
+  if (!f) {
+    Serial.println("file open failed");
+  } else {
+     f.println(tagJson);
+     f.close();
+     Serial.println("Saved tag info");
+  }
 }
 
 JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength, JsonBuffer *jsonBuffer) {
@@ -59,7 +105,9 @@ JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength, JsonBuffer *jsonBuffe
   }
   Serial.println(uidStr);
   http.begin(HTTP_HOST, HTTP_PORT, "/tags/" + uidStr);
+  
   int httpCode = http.GET();
+  http.setTimeout(100);
   JsonObject * root = NULL;
   Serial.print("HTTP Code: "); Serial.print(httpCode, DEC);
   Serial.println("");
@@ -69,24 +117,32 @@ JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength, JsonBuffer *jsonBuffe
       Serial.println("OK - " + resp);
     
       //StaticJsonBuffer<200> jsonBuffer;
-      root = &(jsonBuffer->parseObject(resp));      
+      root = &(jsonBuffer->parseObject(resp));   
+      if (root->success()) {
+        saveTagInfoToFS(uidStr, resp);
+        return root;           
+      } else {
+        return NULL;        
+      }
       return root;
       } else {
-        Serial.printf("[HTTP] GET failed");
+        Serial.printf("[HTTP] GET failed, trying SPIFFS");        
+        root = getTagInfoFromFS(uidStr, jsonBuffer);
       }
   }  
   return root;
 }
 
-bool verifyBlock(uint8_t sector, uint8_t keyN, uint8_t uid[7], uint8_t uidLen, uint8_t key[6], const char * content) {
-  uint8_t block = sector / 4;  
+bool verifyBlock(uint8_t block, uint8_t keyN, uint8_t uid[7], uint8_t uidLen, uint8_t key[6], const char * content) {
+  uint8_t sector = block / 4;  
   bool success = false;
   success = nfc.mifareclassic_AuthenticateBlock(uid, uidLen, block, keyN, key);
   if (success) {
     Serial.print("Authenticated to block "); Serial.println(block, DEC);
     unsigned char data[16];
     success = nfc.mifareclassic_ReadDataBlock(block, data);
-    if (String(content).equals(String((char *)data))) {
+    //if (String(content).equals(String((char *)data))) {
+    if (memcmp(content, data, 16) == 0) {
       Serial.println("Content matched!");
       return true;
     } else {
@@ -104,14 +160,23 @@ bool verifyBlock(uint8_t sector, uint8_t keyN, uint8_t uid[7], uint8_t uidLen, u
 bool processTagData(JsonObject& blocks, uint8_t uid[7], uint8_t uidLength) {
   Serial.println("Attempting to verify blocks...");
   //blocks.prettyPrintTo(Serial);
+  bool verified=false;
   for (JsonObject::iterator it=blocks.begin(); it!=blocks.end(); ++it)
   {
+   Serial.print("Block: ");
    Serial.println(it->key);
    //String content = "";
-   const char * content;
+   char content[16];
    if (((JsonObject&)(it->value)).containsKey("Content")) {
-    content = (const char *) (((JsonObject&)(it->value))["Content"]);
-    Serial.println("Match Content: " + String(content));
+    //content = (const char *) (((JsonObject&)(it->value))["Content"]);
+    //Serial.println("Match Content: " + String(content));
+    Serial.println("Match Content: ");
+    for (uint8_t i = 0; i < 16; i++) {
+      content[i] = (uint8_t)((JsonObject&)(it->value))["Content"][i];
+      Serial.print(content[i], HEX);      
+      Serial.print(" ");
+    }
+    Serial.println("");
    } else {
     Serial.println("No content, can't verify");
     return false;
@@ -132,10 +197,15 @@ bool processTagData(JsonObject& blocks, uint8_t uid[7], uint8_t uidLength) {
     Serial.print(" ");
    }
    Serial.println("");
-   uint8_t sector = String((const char *) (it->key)).toInt();
-   verifyBlock(sector, keyN, uid, uidLength, key, content);
+   uint8_t block = String((const char *) (it->key)).toInt();
+   verified = verifyBlock(block, keyN, uid, uidLength, key, content);
+   if (!verified) {    
+    Serial.println("Block didn't match!");
+    //return false;
+   }
    
   }
+  return verified;
 }
 
 
@@ -162,10 +232,7 @@ void loop() {
     {
       // We probably have a Mifare Classic card ... 
       Serial.println("Seems to be a Mifare Classic card (4 byte UID)");
-    
-      // Now we need to try to authenticate it for read/write access
-      // Try with the factory default KeyA: 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF
-      Serial.println("Trying to authenticate block 4 with default KEYA value");
+
       StaticJsonBuffer<1024> jsonBuffer;
       JsonObject * tagData = getTagInfo(uid, uidLength, &jsonBuffer);
       if (tagData == NULL) {
@@ -180,45 +247,6 @@ void loop() {
         } else {
           Serial.println("Tag flagged invalid");
         }
-      }
-      uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-    
-    // Start with block 4 (the first block of sector 1) since sector 0
-    // contains the manufacturer data and it's probably better just
-    // to leave it alone unless you know what you're doing
-      success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
-    
-      if (success)
-      {
-        Serial.println("Sector 1 (Blocks 4..7) has been authenticated");
-        uint8_t data[16];
-    
-        // If you want to write something to block 4 to test with, uncomment
-    // the following line and this text should be read back in a minute
-        // data = { 'a', 'd', 'a', 'f', 'r', 'u', 'i', 't', '.', 'c', 'o', 'm', 0, 0, 0, 0};
-        // success = nfc.mifareclassic_WriteDataBlock (4, data);
-
-        // Try to read the contents of block 4
-        success = nfc.mifareclassic_ReadDataBlock(4, data);
-    
-        if (success)
-        {
-          // Data seems to have been read ... spit it out
-          Serial.println("Reading Block 4:");
-          nfc.PrintHexChar(data, 16);
-          Serial.println("");
-      
-          // Wait a bit before reading the card again
-          delay(1000);
-        }
-        else
-        {
-          Serial.println("Ooops ... unable to read the requested block.  Try another key?");
-        }
-      }
-      else
-      {
-        Serial.println("Ooops ... authentication failed: Try another key?");
       }
     }
     
