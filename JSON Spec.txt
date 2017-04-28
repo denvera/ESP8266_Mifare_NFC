@@ -1,0 +1,28 @@
+JSON Spec
+
+GET /tag/<uid>
+Return:
+{
+	"comment":"Example Tag",
+	"valid":true,
+	"blocks": {
+		"1": {
+			"KeyA":[0xff, 0xff, 0xff,0xff, 0xff, 0xff],
+			"Content":['e','g','c','o','n','t','e','n','t',0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+		},
+		"2": {
+			"KeyB":[0x00,0x00,0x00],
+			"Content":['e','g','c','o','n','t','e','n','t',0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+		}
+	}
+}
+
+PUT /tag/<uid>/ok
+{
+	"acknowledged":"true"
+}
+
+PUT /tag/<uid>/fail
+{
+	"acknowledged":"true"
+}

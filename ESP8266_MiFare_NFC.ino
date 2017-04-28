@@ -10,9 +10,9 @@
 #include <PN532_SPI.h>
 
 #define VERSION "0.1"
-#define SSID "***REMOVED***"
-#define KEY "***REMOVED***"
-#define HTTP_HOST "192.168.1.108"
+#define SSID "YourSSID"
+#define KEY "YourKey"
+#define HTTP_HOST "x.x.x.x"
 #define HTTP_PORT 1337
 
 PN532_SPI pn532spi(SPI, 15);
