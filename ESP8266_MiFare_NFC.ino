@@ -9,11 +9,22 @@
 #include <PN532.h>
 #include <PN532_SPI.h>
 
-#define VERSION "0.1"
+#define VERSION "0.2"
+#define JSON_BUFSIZE 1024
+
+// Add your config below, or just add them to config.h in the same directory and uncomment #define EXTCONFIG below
+// config.h
 #define SSID "YourSSID"
 #define KEY "YourKey"
 #define HTTP_HOST "x.x.x.x"
 #define HTTP_PORT 1337
+// End config.h
+
+
+//#define EXTCONFIG
+#ifdef  EXTCONFIG
+#include "config.h"
+#endif
 
 PN532_SPI pn532spi(SPI, 15);
 PN532 nfc(pn532spi);
@@ -39,7 +50,7 @@ void setup() {
   uint32_t versiondata = nfc.getFirmwareVersion();
   if (! versiondata) {
     Serial.print("Didn't find PN53x board");
-    while (1); // halt
+    while (1); // halt, will force restart after WDT timeout
   }
   
   Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX); 
@@ -58,16 +69,17 @@ void setup() {
 
 }
 
-JsonObject * getTagInfoFromFS(String uidStr, JsonBuffer * jsonBuffer) {
+JsonObject * getTagInfoFromFS(String uidStr) {
   if (mounted) {
     if (SPIFFS.exists("/tags/" + uidStr + ".txt")) {
       Serial.println("Found tag file");
       File f = SPIFFS.open("/tags/" + uidStr + ".txt", "r");
       if (f) {        
         String tagJson = f.readString();
-        f.close();        
+        f.close();
         JsonObject * root = NULL;
-        root = &(jsonBuffer->parseObject(tagJson));
+        StaticJsonBuffer<200> jsonBuffer;
+        root = &(jsonBuffer.parseObject(tagJson));
         if (root->success()) {
           return root;
         } else {
@@ -95,7 +107,7 @@ bool saveTagInfoToFS(String uidStr, String tagJson) {
   }
 }
 
-JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength, JsonBuffer *jsonBuffer) {
+JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength) {
   Serial.print("Get /tag/");
   HTTPClient http;  
   String uidStr;
@@ -116,8 +128,8 @@ JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength, JsonBuffer *jsonBuffe
       String resp = http.getString();
       Serial.println("OK - " + resp);
     
-      //StaticJsonBuffer<200> jsonBuffer;
-      root = &(jsonBuffer->parseObject(resp));   
+      StaticJsonBuffer<JSON_BUFSIZE> jsonBuffer;
+      root = &(jsonBuffer.parseObject(resp));         
       if (root->success()) {
         saveTagInfoToFS(uidStr, resp);
         return root;           
@@ -126,8 +138,8 @@ JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength, JsonBuffer *jsonBuffe
       }
       return root;
       } else {
-        Serial.printf("[HTTP] GET failed, trying SPIFFS");        
-        root = getTagInfoFromFS(uidStr, jsonBuffer);
+        Serial.println("[HTTP] GET failed, trying SPIFFS");
+        root = getTagInfoFromFS(uidStr);
       }
   }  
   return root;
@@ -233,8 +245,8 @@ void loop() {
       // We probably have a Mifare Classic card ... 
       Serial.println("Seems to be a Mifare Classic card (4 byte UID)");
 
-      StaticJsonBuffer<1024> jsonBuffer;
-      JsonObject * tagData = getTagInfo(uid, uidLength, &jsonBuffer);
+      //StaticJsonBuffer<1024> jsonBuffer;
+      JsonObject * tagData = getTagInfo(uid, uidLength);
       if (tagData == NULL) {
         Serial.println("Didn't get any tag data :("); 
       } else {
@@ -248,6 +260,7 @@ void loop() {
           Serial.println("Tag flagged invalid");
         }
       }
+      delay(200);
     }
     
     if (uidLength == 7)
