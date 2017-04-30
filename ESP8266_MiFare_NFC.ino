@@ -10,7 +10,7 @@
 #include <PN532_SPI.h>
 
 #define VERSION "0.2"
-#define JSON_BUFSIZE 1024
+#define JSON_BUFSIZE 768
 
 // Add your config below, or just add them to config.h in the same directory and uncomment #define EXTCONFIG below
 // config.h
@@ -21,7 +21,7 @@
 // End config.h
 
 
-//#define EXTCONFIG
+#define EXTCONFIG
 #ifdef  EXTCONFIG
 #include "config.h"
 #endif
@@ -69,23 +69,15 @@ void setup() {
 
 }
 
-JsonObject * getTagInfoFromFS(String uidStr) {
+String getTagInfoFromFS(String uidStr) {
   if (mounted) {
     if (SPIFFS.exists("/tags/" + uidStr + ".txt")) {
       Serial.println("Found tag file");
       File f = SPIFFS.open("/tags/" + uidStr + ".txt", "r");
       if (f) {        
         String tagJson = f.readString();
-        f.close();
-        JsonObject * root = NULL;
-        StaticJsonBuffer<200> jsonBuffer;
-        root = &(jsonBuffer.parseObject(tagJson));
-        if (root->success()) {
-          return root;
-        } else {
-          Serial.println("Error parsing json: " + tagJson);
-          return NULL;
-        }
+        f.close();        
+        return tagJson;          
       } else {
         Serial.println("Couldnt open tag file");
       }
@@ -93,56 +85,43 @@ JsonObject * getTagInfoFromFS(String uidStr) {
       Serial.println("No tag file found");
     }
   }
-  return NULL;
+  return "";
 }
 
 bool saveTagInfoToFS(String uidStr, String tagJson) {
-  File f = SPIFFS.open("/tags/" + uidStr + ".txt", "w+");
+  File f = SPIFFS.open("/tags/" + uidStr + ".txt", "w");
   if (!f) {
     Serial.println("file open failed");
+    return false;
   } else {
      f.println(tagJson);
      f.close();
      Serial.println("Saved tag info");
+     return true;
   }
 }
 
-JsonObject * getTagInfo(uint8_t uid[7], uint8_t uidLength) {
+String getTagInfo(String uidStr) {
   Serial.print("Get /tag/");
-  HTTPClient http;  
-  String uidStr;
-  for (uint8_t i = 0; i < uidLength; i++) {
-    if (uid[i] <= 0xf) uidStr += "0";
-    uidStr += String(uid[i], HEX);
-  }
+  HTTPClient http; 
   Serial.println(uidStr);
   http.begin(HTTP_HOST, HTTP_PORT, "/tags/" + uidStr);
   
   int httpCode = http.GET();
-  http.setTimeout(100);
-  JsonObject * root = NULL;
+  http.setTimeout(100);  
   Serial.print("HTTP Code: "); Serial.print(httpCode, DEC);
   Serial.println("");
   if (httpCode) {
     if (httpCode == HTTP_CODE_OK) {
-      String resp = http.getString();
-      Serial.println("OK - " + resp);
-    
-      StaticJsonBuffer<JSON_BUFSIZE> jsonBuffer;
-      root = &(jsonBuffer.parseObject(resp));         
-      if (root->success()) {
-        saveTagInfoToFS(uidStr, resp);
-        return root;           
-      } else {
-        return NULL;        
-      }
-      return root;
-      } else {
-        Serial.println("[HTTP] GET failed, trying SPIFFS");
-        root = getTagInfoFromFS(uidStr);
-      }
-  }  
-  return root;
+      String resp = http.getString();      
+      Serial.println("OK - " + resp); 
+      return resp;
+    } else {
+      Serial.println("[HTTP] GET failed, trying SPIFFS");
+      return getTagInfoFromFS(uidStr);
+    }
+  }
+  return "";
 }
 
 bool verifyBlock(uint8_t block, uint8_t keyN, uint8_t uid[7], uint8_t uidLen, uint8_t key[6], const char * content) {
@@ -220,7 +199,14 @@ bool processTagData(JsonObject& blocks, uint8_t uid[7], uint8_t uidLength) {
   return verified;
 }
 
-
+String uidToStr(uint8_t uid[7], uint8_t uidLength) {
+  String uidStr;
+  for (uint8_t i = 0; i < uidLength; i++) {
+    if (uid[i] <= 0xf) uidStr += "0";
+    uidStr += String(uid[i], HEX);
+  }
+  return uidStr;
+}
 
 void loop() {
   uint8_t success;
@@ -244,23 +230,34 @@ void loop() {
     {
       // We probably have a Mifare Classic card ... 
       Serial.println("Seems to be a Mifare Classic card (4 byte UID)");
-
-      //StaticJsonBuffer<1024> jsonBuffer;
-      JsonObject * tagData = getTagInfo(uid, uidLength);
-      if (tagData == NULL) {
-        Serial.println("Didn't get any tag data :("); 
-      } else {
-        tagData->prettyPrintTo(Serial);
-        bool valid = ((JsonObject&)(*tagData))["valid"];
-        if (valid) {
-          String comment = ((JsonObject&)(*tagData))["comment"];
-          Serial.println("Attempting to read blocks from tag: " + comment);
-          processTagData((*tagData)["blocks"], uid, uidLength);
-        } else {
-          Serial.println("Tag flagged invalid");
+      
+      //char * tagJson;
+      //int tagJsonLen;
+      String uidStr = uidToStr(uid, uidLength);
+      String tagJson = getTagInfo(uidStr);
+      Serial.print("JSON received length "); Serial.print(tagJson.length(), DEC); Serial.println(" bytes");
+      if (tagJson.length() >= 0) {
+        StaticJsonBuffer<JSON_BUFSIZE> jsonBuffer;
+        JsonObject& tagData = jsonBuffer.parseObject(tagJson);
+        if (!tagData.success()) {
+          Serial.println("Didn't get any tag data or invalid JSON :("); 
+        } else { // JSON good
+          tagData.prettyPrintTo(Serial);
+          String json;
+          tagData.printTo(json);
+          saveTagInfoToFS(uidStr, json);
+          bool valid = ((JsonObject&)(tagData))["valid"];
+          if (valid) {
+            String comment = ((JsonObject&)(tagData))["comment"];
+            Serial.println("Attempting to read blocks from tag: " + comment);
+            processTagData((tagData)["blocks"], uid, uidLength);
+          } else {
+            Serial.println("Tag flagged invalid");
+          }
         }
       }
       delay(200);
+      
     }
     
     if (uidLength == 7)
