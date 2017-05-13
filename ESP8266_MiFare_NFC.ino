@@ -1,5 +1,3 @@
-#define DEBUG_HTTPCLIENT(...) Serial.printf( __VA_ARGS__ )
-
 #include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
@@ -22,9 +20,13 @@
 
 
 #define EXTCONFIG
+#define USE_SSD1306
+
 #ifdef  EXTCONFIG
-#include "config.h"
+  #include "config.h"
 #endif
+
+
 
 PN532_SPI pn532spi(SPI, 15);
 PN532 nfc(pn532spi);
@@ -36,6 +38,7 @@ void setup() {
   Serial.println("");
   Serial.println("ESP8266 MiFare NFC Reader v" VERSION " - Denver Abrey [denvera@gmail.com]");
   Serial.setDebugOutput(true);
+  initScreen();
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID, KEY);
   Serial.println("Trying to connect to SSID: " SSID);
@@ -66,7 +69,6 @@ void setup() {
     Serial.println("Failed to mount SPIFFS");
   }
   Serial.println("Waiting for an ISO14443A Card ...");
-
 }
 
 String getTagInfoFromFS(String uidStr) {
@@ -217,8 +219,9 @@ void loop() {
   // 'uid' will be populated with the UID, and uidLength will indicate
   // if the uid is 4 bytes (Mifare Classic) or 7 bytes (Mifare Ultralight)
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
-  
+  idleScreen();
   if (success) {
+    readTagScreen("Reading tag...", 10);
     // Display some basic information about the card
     Serial.println("Found an ISO14443A card");
     Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
@@ -230,29 +233,42 @@ void loop() {
     {
       // We probably have a Mifare Classic card ... 
       Serial.println("Seems to be a Mifare Classic card (4 byte UID)");
-      
       //char * tagJson;
       //int tagJsonLen;
+      readTagScreen("Getting tag info...", 20);
       String uidStr = uidToStr(uid, uidLength);
-      String tagJson = getTagInfo(uidStr);
+      String tagJson = getTagInfo(uidStr);      
       Serial.print("JSON received length "); Serial.print(tagJson.length(), DEC); Serial.println(" bytes");
       if (tagJson.length() >= 0) {
         StaticJsonBuffer<JSON_BUFSIZE> jsonBuffer;
         JsonObject& tagData = jsonBuffer.parseObject(tagJson);
+        readTagScreen("Verifying tag info...", 30);
         if (!tagData.success()) {
           Serial.println("Didn't get any tag data or invalid JSON :("); 
+          readTagScreen("Error validating tag!", 0);
+          delay(1500);
         } else { // JSON good
           tagData.prettyPrintTo(Serial);
+          Serial.println(" --- ");
           String json;
           tagData.printTo(json);
           saveTagInfoToFS(uidStr, json);
           bool valid = ((JsonObject&)(tagData))["valid"];
           if (valid) {
             String comment = ((JsonObject&)(tagData))["comment"];
+            readTagScreen("Verifying tag contents...", 50);
             Serial.println("Attempting to read blocks from tag: " + comment);
-            processTagData((tagData)["blocks"], uid, uidLength);
+            if (processTagData((tagData)["blocks"], uid, uidLength)) {
+              readTagScreen("Tag Accepted!", 100);
+              delay(1500);
+            } else {
+              readTagScreen("Invalid Tag Data!", 0);
+              delay(1500);
+            }
           } else {
             Serial.println("Tag flagged invalid");
+            readTagScreen("Tag Invalid!", 0);
+            delay(1500);
           }
         }
       }
