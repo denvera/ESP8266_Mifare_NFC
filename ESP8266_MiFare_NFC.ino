@@ -2,33 +2,44 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 #include <FS.h>
 #include <SPI.h>
 #include <PN532.h>
 #include <PN532_SPI.h>
+#include <Wire.h>
 
-#define VERSION "0.2"
-#define JSON_BUFSIZE 768
 
+#define VERSION "0.3"
+#define JSON_BUFSIZE 1024
+
+#define EXTCONFIG
+
+#ifndef EXTCONFIG
 // Add your config below, or just add them to config.h in the same directory and uncomment #define EXTCONFIG below
 // config.h
 #define SSID "YourSSID"
 #define KEY "YourKey"
 #define HTTP_HOST "x.x.x.x"
-#define HTTP_PORT 1337
+#define HTTP_PORT 4000
+#define LOCK_GPIO D0 // GPIO 16
+#define OTA_PASSWORD "YourOTAPassword" // Or dont define for no password
+#define OTA_NAME "YourOTAName" // Or don't define for default
+#endif
+
 // End config.h
-
-
-#define EXTCONFIG
 #define USE_SSD1306
 
 #ifdef  EXTCONFIG
+  #warning "Using external config.h"
   #include "config.h"
 #endif
 
 
-
-PN532_SPI pn532spi(SPI, 15);
+PN532_SPI pn532spi(SPI, 15); //D8
+//PN532_I2C pn532i2c(Wire);
 PN532 nfc(pn532spi);
 ESP8266WebServer server(80);
 bool mounted = false;
@@ -49,17 +60,19 @@ void setup() {
   Serial.println("");
   Serial.println("Init NFC...");
   nfc.begin();
+  pinMode(LOCK_GPIO, OUTPUT);
 
   uint32_t versiondata = nfc.getFirmwareVersion();
   if (! versiondata) {
     Serial.print("Didn't find PN53x board");
     while (1); // halt, will force restart after WDT timeout
   }
-  
+  setupOTA();
+  //espconn_tcp_set_max_syn(1);
+    
   Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX); 
   Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC); 
   Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
-  
   // configure board to read RFID tags
   nfc.SAMConfig();
   if (SPIFFS.begin()) {
@@ -72,6 +85,7 @@ void setup() {
 }
 
 String getTagInfoFromFS(String uidStr) {
+  readTagScreen("Trying to get from SPIFFS...", 50);
   if (mounted) {
     if (SPIFFS.exists("/tags/" + uidStr + ".txt")) {
       Serial.println("Found tag file");
@@ -108,9 +122,9 @@ String getTagInfo(String uidStr) {
   HTTPClient http; 
   Serial.println(uidStr);
   http.begin(HTTP_HOST, HTTP_PORT, "/tags/" + uidStr);
-  
-  int httpCode = http.GET();
   http.setTimeout(100);  
+  readTagScreen("Trying HTTP call...", 40);
+  int httpCode = http.GET();    
   Serial.print("HTTP Code: "); Serial.print(httpCode, DEC);
   Serial.println("");
   if (httpCode) {
@@ -210,6 +224,12 @@ String uidToStr(uint8_t uid[7], uint8_t uidLength) {
   return uidStr;
 }
 
+void tagSuccess() {
+    digitalWrite(LOCK_GPIO, HIGH);
+    delay(2500);
+    digitalWrite(LOCK_GPIO, LOW);
+}
+
 void loop() {
   uint8_t success;
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
@@ -220,6 +240,7 @@ void loop() {
   // if the uid is 4 bytes (Mifare Classic) or 7 bytes (Mifare Ultralight)
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
   idleScreen();
+  ArduinoOTA.handle();
   if (success) {
     readTagScreen("Reading tag...", 10);
     // Display some basic information about the card
@@ -227,8 +248,7 @@ void loop() {
     Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
     Serial.print("  UID Value: ");
     nfc.PrintHex(uid, uidLength);
-    Serial.println("");
-    
+    Serial.println("");    
     if (uidLength == 4)
     {
       // We probably have a Mifare Classic card ... 
@@ -242,7 +262,7 @@ void loop() {
       if (tagJson.length() >= 0) {
         StaticJsonBuffer<JSON_BUFSIZE> jsonBuffer;
         JsonObject& tagData = jsonBuffer.parseObject(tagJson);
-        readTagScreen("Verifying tag info...", 30);
+        readTagScreen("Verifying tag info...", 50);
         if (!tagData.success()) {
           Serial.println("Didn't get any tag data or invalid JSON :("); 
           readTagScreen("Error validating tag!", 0);
@@ -256,18 +276,19 @@ void loop() {
           bool valid = ((JsonObject&)(tagData))["valid"];
           if (valid) {
             String comment = ((JsonObject&)(tagData))["comment"];
-            readTagScreen("Verifying tag contents...", 50);
+            readTagScreen("Verifying tag contents...", 70);
             Serial.println("Attempting to read blocks from tag: " + comment);
             if (processTagData((tagData)["blocks"], uid, uidLength)) {
               readTagScreen("Tag Accepted!", 100);
-              delay(1500);
+              tagSuccess();
+              //delay(1500);
             } else {
               readTagScreen("Invalid Tag Data!", 0);
               delay(1500);
             }
           } else {
             Serial.println("Tag flagged invalid");
-            readTagScreen("Tag Invalid!", 0);
+            readTagScreen("Invalid/Unkown Tag!", 0);
             delay(1500);
           }
         }
