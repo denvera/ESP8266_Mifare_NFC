@@ -44,12 +44,15 @@ PN532 nfc(pn532spi);
 ESP8266WebServer server(80);
 bool mounted = false;
 
+void ICACHE_FLASH_ATTR setupWebServer();
+
 void setup() {
   Serial.begin(115200);
   Serial.println("");
   Serial.println("ESP8266 MiFare NFC Reader v" VERSION " - Denver Abrey [denvera@gmail.com]");
   Serial.setDebugOutput(true);
   initScreen();
+  WiFi.hostname(OTA_NAME);
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID, KEY);
   Serial.println("Trying to connect to SSID: " SSID);
@@ -81,6 +84,8 @@ void setup() {
   } else {
     Serial.println("Failed to mount SPIFFS");
   }
+  setupWebServer();
+  server.begin();
   Serial.println("Waiting for an ISO14443A Card ...");
 }
 
@@ -122,7 +127,7 @@ String getTagInfo(String uidStr) {
   HTTPClient http; 
   Serial.println(uidStr);
   http.begin(HTTP_HOST, HTTP_PORT, "/tags/" + uidStr);
-  http.setTimeout(100);  
+  http.setTimeout(1000);  
   readTagScreen("Trying HTTP call...", 40);
   int httpCode = http.GET();    
   Serial.print("HTTP Code: "); Serial.print(httpCode, DEC);
@@ -164,22 +169,22 @@ bool verifyBlock(uint8_t block, uint8_t keyN, uint8_t uid[7], uint8_t uidLen, ui
   }  
 }
 
-bool processTagData(JsonObject& blocks, uint8_t uid[7], uint8_t uidLength) {
+bool processTagData(JsonObject blocks, uint8_t uid[7], uint8_t uidLength) {
   Serial.println("Attempting to verify blocks...");
   //blocks.prettyPrintTo(Serial);
   bool verified=false;
   for (JsonObject::iterator it=blocks.begin(); it!=blocks.end(); ++it)
   {
    Serial.print("Block: ");
-   Serial.println(it->key);
+   Serial.println(it->key().c_str());
    //String content = "";
    char content[16];
-   if (((JsonObject&)(it->value)).containsKey("Content")) {
+   if (((it->value())).containsKey("Content")) {
     //content = (const char *) (((JsonObject&)(it->value))["Content"]);
     //Serial.println("Match Content: " + String(content));
     Serial.println("Match Content: ");
     for (uint8_t i = 0; i < 16; i++) {
-      content[i] = (uint8_t)((JsonObject&)(it->value))["Content"][i];
+      content[i] = (uint8_t)((it->value()))["Content"][i];
       Serial.print(content[i], HEX);      
       Serial.print(" ");
     }
@@ -190,21 +195,21 @@ bool processTagData(JsonObject& blocks, uint8_t uid[7], uint8_t uidLength) {
    }
    uint8_t keyN = -1;   
    uint8_t key[6];
-   if (((JsonObject&)(it->value)).containsKey("KeyA")) {
+   if (((it->value())).containsKey("KeyA")) {
     Serial.println("Found KeyA");
     keyN = 0;        
-   } else if (((JsonObject&)(it->value)).containsKey("KeyB")) {
+   } else if (((it->value())).containsKey("KeyB")) {
     Serial.println("Found KeyB");
     keyN = 1;    
    }
    Serial.print("Key: ");
    for (uint8_t i = 0; i<6; i++) {
-    key[i] = (keyN == 0) ? (uint8_t) (((JsonObject&)(it->value))["KeyA"][i]) : (uint8_t) (((JsonObject&)(it->value))["KeyB"][i]);
+    key[i] = (keyN == 0) ? (uint8_t) (((it->value()))["KeyA"][i]) : (uint8_t) (((it->value()))["KeyB"][i]);
     Serial.print(key[i], HEX);
     Serial.print(" ");
    }
    Serial.println("");
-   uint8_t block = String((const char *) (it->key)).toInt();
+   uint8_t block = String((const char *) (it->key().c_str())).toInt();
    verified = verifyBlock(block, keyN, uid, uidLength, key, content);
    if (!verified) {    
     Serial.println("Block didn't match!");
@@ -241,6 +246,7 @@ void loop() {
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
   idleScreen();
   ArduinoOTA.handle();
+  server.handleClient();
   if (success) {
     readTagScreen("Reading tag...", 10);
     // Display some basic information about the card
@@ -260,22 +266,27 @@ void loop() {
       String tagJson = getTagInfo(uidStr);      
       Serial.print("JSON received length "); Serial.print(tagJson.length(), DEC); Serial.println(" bytes");
       if (tagJson.length() >= 0) {
-        StaticJsonBuffer<JSON_BUFSIZE> jsonBuffer;
-        JsonObject& tagData = jsonBuffer.parseObject(tagJson);
+        //StaticJsonDocument<JSON_BUFSIZE> jsonBuffer;
+        StaticJsonDocument<JSON_BUFSIZE> tagData;
+        //JsonObject& tagData = jsonBuffer.parseObject(tagJson);
+        auto error = deserializeJson(tagData, tagJson);
         readTagScreen("Verifying tag info...", 50);
-        if (!tagData.success()) {
+        //if (!tagData.success()) {
+        if (error) {
           Serial.println("Didn't get any tag data or invalid JSON :("); 
           readTagScreen("Error validating tag!", 0);
           delay(1500);
         } else { // JSON good
-          tagData.prettyPrintTo(Serial);
+          //tagData.prettyPrintTo(Serial);
+          serializeJsonPretty(tagData, Serial);
           Serial.println(" --- ");
           String json;
-          tagData.printTo(json);
+          //tagData.printTo(json);
+          serializeJson(tagData, json);
           saveTagInfoToFS(uidStr, json);
-          bool valid = ((JsonObject&)(tagData))["valid"];
+          bool valid = ((tagData))["valid"];
           if (valid) {
-            String comment = ((JsonObject&)(tagData))["comment"];
+            String comment = ((tagData))["comment"];
             readTagScreen("Verifying tag contents...", 70);
             Serial.println("Attempting to read blocks from tag: " + comment);
             if (processTagData((tagData)["blocks"], uid, uidLength)) {

@@ -1,8 +1,9 @@
 #ifdef USE_SSD1306
 #include <brzo_i2c.h>
-#include "SSD1306Brzo.h"
+//#include <Wire.h> 
+#include "SSD1306.h"
 
-SSD1306Brzo  display(0x3c, D2, D1);
+SSD1306  display(0x3c, D2, D1);
 
 unsigned long lastActive = 0;
 
